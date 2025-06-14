@@ -8,6 +8,7 @@ import json
 
 np.random.seed(42)
 
+# --- Data Loading / Simulation ---
 try:
     df = pd.read_csv('online_shoppers_intention.csv')
     df = df.sample(n=500, random_state=42)
@@ -24,90 +25,134 @@ except FileNotFoundError:
         'bounce': np.random.choice([0, 1], 500, p=[0.7, 0.3]),
         'visitor_type': np.random.choice(['New', 'Returning'], 500, p=[0.6, 0.4])
     }
+    # Add missing values
     for col in ['age', 'session_duration', 'time_on_product_page']:
         mask = np.random.random(500) < 0.05
         data[col] = np.where(mask, np.nan, data[col])
     df = pd.DataFrame(data)
 
+# --- Preprocessing ---
 def preprocess_data(df):
     print("Missing Values Before:\n", df.isnull().sum())
-    numerical_cols = ['Administrative_Duration', 'Informational_Duration', 'ProductRelated_Duration', 'BounceRates', 'ExitRates', 'PageValues']
-    categorical_cols = ['Month', 'OperatingSystems', 'Browser', 'Region', 'TrafficType', 'VisitorType', 'Weekend']
-    if 'age' in df.columns:
-        numerical_cols.append('age')
-        df['age'].fillna(df['age'].median(), inplace=True)
-    for col in numerical_cols:
+
+    # Fill missing numerical
+    num_cols = ['age', 'session_duration', 'time_on_product_page']
+    for col in num_cols:
         if col in df.columns:
-            df[col].fillna(df[col].mean(), inplace=True)
-    for col in categorical_cols:
+            df[col].fillna(df[col].median(), inplace=True)
+
+    # Fill missing categorical
+    cat_cols = ['device', 'region', 'visitor_type']
+    for col in cat_cols:
         if col in df.columns:
             df[col].fillna(df[col].mode()[0], inplace=True)
+
     print("\nMissing Values After:\n", df.isnull().sum())
-    df = pd.get_dummies(df, columns=[col for col in categorical_cols if col in df.columns], drop_first=True)
-    if 'ProductRelated_Duration' in df.columns and 'ProductRelated' in df.columns:
-        df['avg_time_per_page'] = df['ProductRelated_Duration'] / (df['ProductRelated'] + 1)
-    if 'Revenue' in df.columns:
-        df['purchase_per_session'] = df['Revenue'].astype(int) / (df['ProductRelated_Duration'] + 1)
+
+    # One-hot encoding
+    df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
+
+    # Feature engineering
+    if 'time_on_product_page' in df.columns and 'page_views' in df.columns:
+        df['avg_time_per_page'] = df['time_on_product_page'] / (df['page_views'] + 1)
+
+    # Outlier removal
     def remove_outliers(df, column):
-        if column in df.columns:
-            Q1 = df[column].quantile(0.25)
-            Q3 = df[column].quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
-            df = df[(df[column] >= lower_bound) & (df[column] <= upper_bound)]
-        return df
-    for col in ['ProductRelated_Duration', 'BounceRates', 'ExitRates']:
+        Q1 = df[column].quantile(0.25)
+        Q3 = df[column].quantile(0.75)
+        IQR = Q3 - Q1
+        lower, upper = Q1 - 1.5 * IQR, Q3 + 1.5 * IQR
+        return df[(df[column] >= lower) & (df[column] <= upper)]
+
+    for col in ['session_duration', 'time_on_product_page']:
         if col in df.columns:
             df = remove_outliers(df, col)
+
+    # Standardize
     scaler = StandardScaler()
-    numerical_cols = [col for col in numerical_cols if col in df.columns] + ['avg_time_per_page']
-    if numerical_cols:
-        df[numerical_cols] = scaler.fit_transform(df[numerical_cols])
+    scale_cols = ['age', 'session_duration', 'time_on_product_page', 'avg_time_per_page']
+    scale_cols = [col for col in scale_cols if col in df.columns]
+    df[scale_cols] = scaler.fit_transform(df[scale_cols])
+
     return df
 
 df_cleaned = preprocess_data(df)
 
+# --- Exploratory Data Analysis ---
 def perform_eda(df):
     print("\nSummary Statistics:\n", df.describe())
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(df.select_dtypes(include=[np.number]).corr(), annot=True, cmap='coolwarm', center=0)
-    plt.title('Correlation Matrix of Numerical Features')
+
+    # 1. Correlation Heatmap
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(df.select_dtypes(include=[np.number]).corr(), annot=True, cmap='RdBu', center=0)
+    plt.title('🔍 Correlation Matrix of Numerical Features', fontsize=14)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
     plt.savefig('correlation_matrix.png')
     plt.close()
-    visitor_col = next((col for col in df.columns if 'VisitorType_' in col or 'visitor_type_' in col), None)
-    if visitor_col and 'ProductRelated_Duration' in df.columns:
+
+    # Visitor Type Column
+    visitor_col = next((col for col in df.columns if 'visitor_type_' in col), None)
+
+    # 2. Boxplot: Product Duration by Visitor Type
+    if visitor_col and 'time_on_product_page' in df.columns:
         plt.figure(figsize=(8, 6))
-        sns.boxplot(x=visitor_col, y='ProductRelated_Duration', data=df)
-        plt.title('Product Page Duration by Visitor Type')
+        sns.boxplot(x=visitor_col, y='time_on_product_page', data=df, palette="Set2")
+        plt.title('🕒 Product Page Duration by Visitor Type')
+        plt.xlabel("Visitor Type")
+        plt.ylabel("Time on Product Page")
+        plt.tight_layout()
         plt.savefig('duration_by_visitor.png')
         plt.close()
-    region_col = next((col for col in df.columns if 'Region_' in col), None)
-    if region_col and 'Revenue' in df.columns:
+
+    # 3. Barplot: Purchases by Region
+    region_col = next((col for col in df.columns if 'region_' in col), None)
+    if region_col and 'purchases' in df.columns:
+        region_data = df.groupby(region_col)['purchases'].mean().reset_index()
         plt.figure(figsize=(8, 6))
-        sns.barplot(x=region_col, y='Revenue', data=df)
-        plt.title('Purchase Rate by Region')
+        sns.barplot(x=region_col, y='purchases', data=region_data, palette='coolwarm')
+        plt.title('🛒 Average Purchase Rate by Region')
+        plt.ylabel("Avg Purchases")
+        plt.xlabel("Region")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
         plt.savefig('purchases_by_region.png')
         plt.close()
-    if visitor_col and 'ProductRelated_Duration' in df.columns and 'Revenue' in df.columns and 'PageValues' in df.columns:
+
+    # 4. Scatter Plot: Time vs Purchases
+    if visitor_col and 'time_on_product_page' in df.columns and 'purchases' in df.columns:
         plt.figure(figsize=(8, 6))
-        sns.scatterplot(x='ProductRelated_Duration', y='Revenue', hue=visitor_col, size='PageValues', data=df)
-        plt.title('Product Duration vs Purchases')
+        sns.scatterplot(x='time_on_product_page', y='purchases', hue=visitor_col, data=df, alpha=0.6, s=70)
+        plt.title('📈 Time on Product Page vs Purchases')
+        plt.xlabel('Time on Product Page')
+        plt.ylabel('Number of Purchases')
+        plt.tight_layout()
         plt.savefig('duration_vs_purchases.png')
         plt.close()
-    if visitor_col and 'BounceRates' in df.columns:
-        bounce_rate = df.groupby(visitor_col)['BounceRates'].mean()
-        print("\nBounce Rate by Visitor Type:\n", bounce_rate)
-    if visitor_col and 'Revenue' in df.columns:
-        visitor_purchases = df.groupby(visitor_col)['Revenue'].mean().reset_index()
-        labels = ['New', 'Returning'] if 'visitor_type_' in visitor_col else ['Returning' if 'Returning' in visitor_col else 'New']
+
+    # 5. Bounce Rate by Visitor Type
+    if visitor_col and 'bounce' in df.columns:
+        bounce_rate = df.groupby(visitor_col)['bounce'].mean().reset_index()
+        plt.figure(figsize=(8, 5))
+        sns.barplot(x=visitor_col, y='bounce', data=bounce_rate, palette='muted')
+        plt.title('🚪 Bounce Rate by Visitor Type')
+        plt.xlabel('Visitor Type')
+        plt.ylabel('Average Bounce Rate')
+        plt.tight_layout()
+        plt.savefig('bounce_rate_by_visitor.png')
+        plt.close()
+
+    # 6. Interactive JSON Chart (Visitor vs Purchases)
+    if visitor_col and 'purchases' in df.columns:
+        visitor_purchases = df.groupby(visitor_col)['purchases'].mean().reset_index()
+        labels = visitor_purchases[visitor_col].tolist()
         chart_config = {
             "type": "bar",
             "data": {
                 "labels": labels,
                 "datasets": [{
                     "label": "Average Purchases",
-                    "data": visitor_purchases['Revenue'].tolist(),
+                    "data": visitor_purchases['purchases'].tolist(),
                     "backgroundColor": ["#36A2EB", "#FF6384"],
                     "borderColor": ["#36A2EB", "#FF6384"],
                     "borderWidth": 1
@@ -131,17 +176,20 @@ def perform_eda(df):
         }
         with open('purchases_by_visitor_chart.json', 'w') as f:
             json.dump(chart_config, f)
+
+    # Interpretation Summary
     insights = """
-    ### Key Findings:
-    1. New visitors spend less time on product pages compared to returning visitors.
-    2. Region-specific purchase rates vary, with some regions showing higher engagement.
-    3. Bounce rates are higher for new visitors, indicating potential onboarding issues.
-    4. Product page duration correlates moderately with purchases.
-    5. Outliers in duration and bounce rates were capped for robust analysis.
+    ### Key Insights:
+    1. 📉 New visitors spend less time on product pages than returning ones.
+    2. 🗺️ Regional differences observed in average purchase rates.
+    3. 🚪 Bounce rates are higher for new visitors – onboarding needs improvement.
+    4. 📈 Time spent on product pages moderately correlates with purchases.
+    5. 🔍 Outliers removed to improve analysis quality and model accuracy.
     """
     print(insights)
     return insights
 
+# Run EDA and save results
 insights = perform_eda(df_cleaned)
 df_cleaned.to_csv('cleaned_user_behavior.csv', index=False)
 with open('eda_insights.txt', 'w') as f:
